@@ -9,6 +9,7 @@
 ![dependencies](https://img.shields.io/badge/dependencies-none-brightgreen?style=flat-square)
 ![hotkey](https://img.shields.io/badge/hotkey-Copilot%20key-8A2BE2?style=flat-square)
 ![stdlib](https://img.shields.io/badge/pure-Python%20stdlib-F7DF1E?style=flat-square&logo=python&logoColor=black)
+![license](https://img.shields.io/badge/license-MIT-3DA639?style=flat-square)
 
 <sub>同一个模型，英文成绩是 100% 基准线，简体中文只有 96.9%——这就是值得多按这一下的理由。</sub>
 
@@ -201,7 +202,10 @@ Windows 11 上 Copilot 键发的是 `Win+Shift+F23`。多数情况下这个组�
 - 需要 Python 3.10+；本工具只用标准库，不装任何包。
 - 无边框模式依赖 Tk 的透明色 + 分层窗口。已实测 Windows 11 23H2 正常；若某台机器上圆角外露底色或输入法候选框异常，把 `frameless` 改成 `false` 即可。
 - 受 Windows 前台窗口策略限制，气泡弹出后极少数情况下需要点一下才能直接打字；复制粘贴不受影响。
-- 仓库暂未附加开源许可证，需要的话告诉我，我可以补 MIT。
+
+## License
+
+MIT License，详见 [LICENSE](LICENSE)。随便用、随便改、可以商用，保留版权声明即可。
 
 ---
 
