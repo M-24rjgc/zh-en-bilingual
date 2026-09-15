@@ -10,5 +10,13 @@
   "timeout_sec": 60,
   "auto_copy_english": true,
   "always_on_top": true,
-  "font_size": 14
+  "font_size": 14,
+  "theme": "auto",
+  "frameless": true,
+  "translucency": 0.97,
+  "corner_radius": 20,
+  "bubble_tail": true,
+  "animations": true,
+  "auto_dismiss": true,
+  "accent": ""
 }

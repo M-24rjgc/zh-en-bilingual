@@ -12,11 +12,21 @@
 
 <sub>同一个模型，英文成绩是 100% 基准线，简体中文只有 96.9%——这就是值得多按这一下的理由。</sub>
 
-<img src="assets/demo.png" width="620" alt="按下热键后的中英双语气泡：中文输入、英文译文、回译中文">
+<img src="assets/demo.png" width="620" alt="中英双语气泡：中文输入、英文译文、回译中文；鼠标悬停时按钮条浮现">
 
 </div>
 
 ---
+
+## 它是一个气泡，不是一个窗口
+
+没有标题栏、没有边框、没有阴影——只有一块圆角白底浮在屏幕上，**尖角指向你的鼠标**。
+
+刚触发时它只是一个紧凑的输入条；翻译完成后它**向下生长**，把英文放大成主角、把回译退成配角。配色跟随系统深浅色，强调色直接取你 Windows 主题里的那个颜色。
+
+<img src="assets/dark.png" width="620" alt="深色模式下的中英双语气泡">
+
+鼠标移进去，操作按钮才浮现；移开就自动收起。你也可以按 📌 固定它。
 
 ## 你大概遇到过这些事
 
@@ -119,12 +129,15 @@ python translate_popup.py                     # 或者现在就手动跑起来
 
 | 按键 / 动作 | 效果 |
 | --- | --- |
-| `Copilot 键` | 在鼠标附近弹出输入框（任意软件里都能按） |
+| `Copilot 键` | 在鼠标附近弹出气泡（任意软件里都能按） |
 | `Ctrl+Enter` | 翻译 |
-| `Esc` | 关掉窗口，后台继续待命 |
+| `Esc` | 收起气泡，后台继续待命 |
+| 鼠标移进气泡 | 底部浮现操作条：翻译 / 复制英文 / 复制回译中文 / 复制全部 / 清空 / 固定 |
+| 鼠标移开 | 自动收起（按 📌 固定后就不会） |
+| 拖动气泡空白处 | 移动位置 |
 | 翻译完成 | 主要译文（英文输入时是中文）**自动进剪贴板**，`Ctrl+V` 就能贴进 ChatGPT |
 
-窗口上还有「复制英文 / 复制回译中文 / 复制全部 / 清空」。
+键盘党可以直接用：`Ctrl+1` 复制英文、`Ctrl+2` 复制回译中文、`Ctrl+Shift+C` 复制全部。
 
 实测速度：中译英 + 回译约 **2–3 秒**，英译中约 **1 秒**（deepseek-flash，关闭推理）。
 
@@ -147,6 +160,7 @@ python translate_popup.py --install-startup
 python translate_popup.py --uninstall-startup
 python translate_popup.py --once          # 从 stdin 读文本，直接吐 JSON（适合接进脚本）
 python translate_popup.py --selftest      # 离线自测语言判定
+python translate_popup.py --snapshot      # 渲染各状态界面截图到 snapshots/（开发和验收用）
 ```
 
 用 `pythonw.exe` 启动可以完全没有控制台窗口（`--install-startup` 已经帮你这么配了）。
@@ -166,7 +180,13 @@ Windows 11 上 Copilot 键发的是 `Win+Shift+F23`。多数情况下这个组�
 | `codex_config_path` | 上面那个文件的路径；留空 = `~/.codex/config.toml` |
 | `reasoning_effort` | `none` 最省时（每次约 1–2 秒）；留空表示不带这个参数 |
 | `max_tokens` / `timeout_sec` | 单次请求预算与超时 |
-| `auto_copy_english` / `always_on_top` / `font_size` | 界面行为 |
+| `theme` | `auto` 跟随系统深浅色，也可写死 `light` / `dark` |
+| `accent` | 强调色，留空 = 取你 Windows 主题的系统强调色 |
+| `frameless` | `true` 为无边框气泡；万一某些环境里输入法候选框异常，改成 `false` 就退回系统标题栏 |
+| `translucency` | `0.97` 微微透底；写 `1.0` 完全不透明 |
+| `corner_radius` / `bubble_tail` | 圆角半径、是否带指向鼠标的尖角 |
+| `animations` / `auto_dismiss` | 生长动画、鼠标移开自动收起 |
+| `auto_copy_english` / `always_on_top` / `font_size` | 自动复制、置顶、整体缩放 |
 
 ## 隐私
 
@@ -179,6 +199,8 @@ Windows 11 上 Copilot 键发的是 `Win+Shift+F23`。多数情况下这个组�
 - 目前只支持 Windows（依赖 `RegisterHotKey` / 低级键盘钩子）。
 - 需要你自己准备一个兼容 OpenAI 的接口。
 - 需要 Python 3.10+；本工具只用标准库，不装任何包。
+- 无边框模式依赖 Tk 的透明色 + 分层窗口。已实测 Windows 11 23H2 正常；若某台机器上圆角外露底色或输入法候选框异常，把 `frameless` 改成 `false` 即可。
+- 受 Windows 前台窗口策略限制，气泡弹出后极少数情况下需要点一下才能直接打字；复制粘贴不受影响。
 - 仓库暂未附加开源许可证，需要的话告诉我，我可以补 MIT。
 
 ---
@@ -186,6 +208,8 @@ Windows 11 上 Copilot 键发的是 `Win+Shift+F23`。多数情况下这个组�
 ## English
 
 **A Windows popup translator on a global hotkey: Chinese in, English plus an independent back-translation out.**
+
+It is a real bubble: frameless, rounded, with a little tail pointing at your cursor. It appears small, grows when the answer arrives, follows your system light/dark theme, and reveals its action bar only when you hover. Move the mouse away and it dismisses itself.
 
 Paste a Chinese prompt, hit `Ctrl+Enter`, and the English lands in your clipboard while a *separately generated* Chinese back-translation appears right below it — so you can check the translation yourself. Paste English and you get Chinese only. Tone, filler words and hesitations (`emmm`, `你懂我意思吧`) are preserved on purpose: the prompts explicitly forbid polishing, optimizing or restructuring, and code blocks, JSON, URLs and identifiers are left untouched.
 

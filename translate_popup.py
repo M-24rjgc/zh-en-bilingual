@@ -14,6 +14,7 @@
   python translate_popup.py --uninstall-startup
   python translate_popup.py --once       # 从 stdin 读文本，打印 JSON 结果（自测用）
   python translate_popup.py --selftest   # 只跑语言判定自测，不联网
+  python translate_popup.py --snapshot   # 渲染各状态的界面截图到 snapshots/（开发验收用）
 """
 
 from __future__ import annotations
@@ -69,6 +70,14 @@ DEFAULT_CONFIG = {
     "auto_copy_english": True,
     "always_on_top": True,
     "font_size": 14,
+    "theme": "auto",
+    "frameless": True,
+    "translucency": 0.97,
+    "corner_radius": 20,
+    "bubble_tail": True,
+    "animations": True,
+    "auto_dismiss": True,
+    "accent": "",
 }
 
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f]")
@@ -627,7 +636,103 @@ def translate(text: str, cfg: dict, logger: logging.Logger, progress=None) -> di
 
 
 # --------------------------------------------------------------------------
-# 弹窗界面
+# 主题与配色
+# --------------------------------------------------------------------------
+
+ACCENT_FALLBACK = "#0078D4"
+TRANSPARENT_KEY = "#FF00FE"
+
+LIGHT_TOKENS = {
+    "bubble": "#FFFFFF",
+    "card": "#F6F8FA",
+    "text": "#161A1F",
+    "dim": "#5A626B",
+    "muted": "#8C949C",
+    "border": "#E7EAEF",
+    "hairline": "#EEF1F5",
+    "chip": "#F1F3F6",
+    "chip_text": "#454C54",
+    "hover": "#E9EDF2",
+    "press": "#D9E0E8",
+    "amber": "#E8A33D",
+    "ok": "#16A34A",
+    "ok_bg": "#E8F5EC",
+    "err": "#B00020",
+}
+
+DARK_TOKENS = {
+    "bubble": "#1F2125",
+    "card": "#17191C",
+    "text": "#E8EAED",
+    "dim": "#A8B0B8",
+    "muted": "#79828C",
+    "border": "#2E3238",
+    "hairline": "#2A2E34",
+    "chip": "#262A30",
+    "chip_text": "#C3CAD2",
+    "hover": "#2C3138",
+    "press": "#39404A",
+    "amber": "#E0A45C",
+    "ok": "#3CCB7F",
+    "ok_bg": "#17301F",
+    "err": "#FF6B6B",
+}
+
+
+def detect_system_theme() -> str:
+    """读系统「应用」配色模式，返回 light 或 dark。"""
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return "light" if int(value) else "dark"
+    except Exception:
+        return "light"
+
+
+def detect_accent_color() -> str:
+    """读系统强调色（注册表里存的是 ABGR）。"""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\DWM") as key:
+            value, _ = winreg.QueryValueEx(key, "AccentColor")
+        value = int(value) & 0xFFFFFFFF
+        return "#%02X%02X%02X" % (value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF)
+    except Exception:
+        return ACCENT_FALLBACK
+
+
+def _hex_rgb(color: str) -> tuple:
+    color = (color or "").lstrip("#")
+    if len(color) != 6:
+        color = ACCENT_FALLBACK.lstrip("#")
+    return int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+
+
+def _blend(color: str, other: str, amount: float) -> str:
+    a = _hex_rgb(color)
+    b = _hex_rgb(other)
+    amount = max(0.0, min(1.0, amount))
+    return "#%02X%02X%02X" % tuple(int(round(a[i] + (b[i] - a[i]) * amount)) for i in range(3))
+
+
+def build_tokens(theme: str, accent: str) -> dict:
+    tokens = dict(LIGHT_TOKENS if theme == "light" else DARK_TOKENS)
+    accent = accent if re.fullmatch(r"#[0-9A-Fa-f]{6}", accent or "") else ACCENT_FALLBACK
+    tokens["accent"] = accent.upper()
+    tokens["accent_hover"] = _blend(accent, "#000000" if theme == "light" else "#FFFFFF", 0.12)
+    tokens["accent_soft"] = _blend(accent, tokens["bubble"], 0.86)
+    tokens["select"] = _blend(accent, tokens["bubble"], 0.68)
+    return tokens
+
+
+# --------------------------------------------------------------------------
+# 气泡界面（canvas 自绘 + 三个 Text 叠放）
 # --------------------------------------------------------------------------
 
 
@@ -642,112 +747,641 @@ class PopupApp:
         self.cfg = cfg
         self.logger = logger
         self.events: queue.Queue = queue.Queue()
+
+        self.unit = max(0.8, min(2.2, float(cfg.get("font_size") or 14) / 14.0))
+        try:
+            self.dpi = max(1.0, float(root.winfo_fpixels("1i")) / 96.0)
+        except Exception:
+            self.dpi = 1.0
+        self.frameless = bool(cfg.get("frameless", True))
+        self.animations = bool(cfg.get("animations", True))
+        self.auto_dismiss = bool(cfg.get("auto_dismiss", True))
+        self.use_tail = bool(cfg.get("bubble_tail", True))
+        self.radius = self.px(float(cfg.get("corner_radius") or 20))
+        try:
+            self.translucency = max(0.55, min(1.0, float(cfg.get("translucency") or 1.0)))
+        except (TypeError, ValueError):
+            self.translucency = 1.0
+
+        self.theme_name = "light"
+        self.tokens = build_tokens("light", ACCENT_FALLBACK)
+        self.hotkey_text = str(cfg.get("hotkey") or "")
+        self.state = "input"
         self.busy = False
-        self.hotkey_text = cfg.get("hotkey", "")
+        self.visible = False
+        self.pinned = False
+        self.hover = False
+        self.hover_until = 0.0
+        self.was_foreground = False
+        self.last_fg_ours = False
+        self.shown_at = 0.0
+        self.copy_flash_until = 0.0
+        self.status_text = "输入中文开始翻译"
+        self.status_kind = "idle"
+        self.has_result = False
+        self.progress = 0.0
+        self.win_x = 160
+        self.win_y = 160
+        self.tail_edge = "top"
+        self.tail_x = 0
+        self.rects: dict = {}
+        self.items: dict = {}
+        self._jobs: set = set()
+        self.drag_offset = None
 
-        size = int(cfg.get("font_size") or 14)
-        family = "Microsoft YaHei UI"
-        self.ui_font = (family, size)
-        self.small_font = (family, max(9, size - 2))
-        self.mono_font = ("Consolas", max(10, size - 1))
-
+        self.ui_family = "Microsoft YaHei UI"
+        self.en_family = "Segoe UI Variable Display"
+        self.label_family = "Segoe UI Variable Text"
+        self.mono_family = "Cascadia Mono"
+        self._setup_fonts()
+        self._create_widgets()
+        self._apply_window_style()
         root.title("中英双语气泡")
-        root.geometry("780x860")
-        root.minsize(620, 640)
         root.protocol("WM_DELETE_WINDOW", self.hide)
-        root.configure(bg="#f4f5f7")
-
-        self._build_widgets()
-        root.bind("<Control-Return>", self._on_ctrl_enter)
-        root.bind("<Escape>", lambda _e: self.hide())
         root.withdraw()
 
-    # -- 界面 -------------------------------------------------------------
-    def _build_widgets(self) -> None:
-        tk = self.tk
-        outer = tk.Frame(self.root, bg="#f4f5f7", padx=12, pady=12)
-        outer.pack(fill="both", expand=True)
+    # -- 尺寸与字体 --------------------------------------------------------
+    def px(self, value: float) -> int:
+        """逻辑像素 -> 真实像素（跟随 DPI 与 font_size）。"""
+        return int(round(value * self.unit * self.dpi))
 
-        tk.Label(
-            outer,
-            text="输入中文 → 英文译文 + 独立回译中文；输入英文 → 只给中文译文",
-            bg="#f4f5f7",
-            anchor="w",
-            font=self.small_font,
-        ).pack(fill="x")
+    def _setup_fonts(self) -> None:
+        u = self.unit
+        self.f_title = (self.ui_family, int(round(12 * u)), "bold")
+        self.f_body = (self.ui_family, int(round(11.5 * u)))
+        self.f_en = (self.en_family, int(round(12 * u)))
+        self.f_label = (self.label_family, int(round(8.5 * u)), "bold")
+        self.f_chip = (self.mono_family, int(round(8.5 * u)))
+        self.f_status = (self.ui_family, int(round(9.5 * u)))
+        self.f_icon = (self.ui_family, int(round(11 * u)), "bold")
 
-        self.input = tk.Text(outer, height=9, wrap="word", undo=True, font=self.ui_font, relief="solid", borderwidth=1)
-        self.input.pack(fill="both", expand=True, pady=(6, 8))
-
-        buttons = tk.Frame(outer, bg="#f4f5f7")
-        buttons.pack(fill="x")
-        self.btn_translate = tk.Button(buttons, text="翻译 (Ctrl+Enter)", command=self.start_translate, font=self.small_font)
-        self.btn_translate.pack(side="left")
-        tk.Button(buttons, text="复制英文", command=lambda: self.copy_field("english"), font=self.small_font).pack(side="left", padx=(8, 0))
-        tk.Button(buttons, text="复制回译中文", command=lambda: self.copy_field("chinese"), font=self.small_font).pack(side="left", padx=(8, 0))
-        tk.Button(buttons, text="复制全部", command=self.copy_all, font=self.small_font).pack(side="left", padx=(8, 0))
-        tk.Button(buttons, text="清空", command=self.clear_all, font=self.small_font).pack(side="left", padx=(8, 0))
-        tk.Button(buttons, text="关闭 (Esc)", command=self.hide, font=self.small_font).pack(side="right")
-
-        tk.Label(outer, text="English", bg="#f4f5f7", anchor="w", font=self.small_font).pack(fill="x", pady=(12, 2))
-        self.out_en = tk.Text(outer, height=7, wrap="word", font=self.mono_font, relief="solid", borderwidth=1, bg="#ffffff")
-        self.out_en.pack(fill="both", expand=True)
-
-        tk.Label(outer, text="回译中文", bg="#f4f5f7", anchor="w", font=self.small_font).pack(fill="x", pady=(10, 2))
-        self.out_zh = tk.Text(outer, height=6, wrap="word", font=self.ui_font, relief="solid", borderwidth=1, bg="#ffffff")
-        self.out_zh.pack(fill="both", expand=True)
-
-        self.status = tk.Label(outer, text="", bg="#f4f5f7", anchor="w", font=self.small_font, fg="#444444")
-        self.status.pack(fill="x", pady=(8, 0))
-
-        for widget in (self.out_en, self.out_zh):
+    # -- 基础控件 ----------------------------------------------------------
+    def _make_text(self, font, undo: bool = False, readonly: bool = False):
+        widget = self.tk.Text(
+            self.root,
+            wrap="word",
+            font=font,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            undo=undo,
+            padx=self.px(10),
+            pady=self.px(7),
+            spacing1=self.px(1),
+            spacing3=self.px(2),
+            insertwidth=self.px(2),
+        )
+        if readonly:
             widget.configure(state="disabled")
+        return widget
 
-    # -- 显示 / 隐藏 -------------------------------------------------------
-    def show(self) -> None:
-        self.root.attributes("-topmost", True)
-        self.root.deiconify()
+    def _create_widgets(self) -> None:
+        tk = self.tk
+        self.canvas = tk.Canvas(self.root, highlightthickness=0, bd=0, bg=TRANSPARENT_KEY)
+        self.canvas.pack(fill="both", expand=True)
+        self.input = self._make_text(self.f_body, undo=True)
+        self.out_en = self._make_text(self.f_en, readonly=True)
+        self.out_zh = self._make_text(self.f_body, readonly=True)
+        # 占位提示必须是独立控件：Text 是子窗口，会盖住 canvas 上画的东西
+        self.placeholder = tk.Label(self.root, text="粘贴或输入中文…", anchor="nw", bd=0,
+                                    padx=0, pady=0, justify="left")
+
+        self.canvas.bind("<Button-1>", self._on_canvas_press)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+        self.canvas.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.canvas.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.root.bind("<Control-Return>", self._on_ctrl_enter)
+        self.root.bind("<Escape>", lambda _e: self.hide())
+        self.root.bind("<Control-Key-1>", lambda _e: self.copy_field("english"))
+        self.root.bind("<Control-Key-2>", lambda _e: self.copy_field("chinese"))
+        self.root.bind("<Control-Shift-Key-C>", lambda _e: self.copy_all())
+        for widget in (self.canvas, self.input, self.out_en, self.out_zh):
+            widget.bind("<MouseWheel>", self._on_wheel)
+        self.input.bind("<KeyRelease>", self._on_input_key)
+        self.input.bind("<<Paste>>", lambda _e: self._schedule(30, self._on_input_key))
+
+    def _on_input_key(self, _event=None) -> None:
+        self._update_placeholder()
+
+    def _update_placeholder(self) -> None:
+        if not self.rects:
+            return
+        if self.input.get("1.0", "end").strip():
+            self.placeholder.place_forget()
+            return
+        rect = self.rects["input_text"]
+        self.placeholder.configure(bg=self.tokens["card"], fg=self.tokens["muted"], font=self.f_body)
+        self.placeholder.place(x=rect[0] + self.px(2), y=rect[1] + self.px(2))
+        self.placeholder.lift()
+
+    def _apply_window_style(self) -> None:
         try:
             self.root.attributes("-topmost", bool(self.cfg.get("always_on_top", True)))
         except Exception:
             pass
-        self._move_near_cursor()
-        self.root.lift()
-        self._force_foreground()
+        if self.frameless:
+            self.root.overrideredirect(True)
+            try:
+                self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
+            except Exception:
+                self.logger.warning("透明色设置失败，气泡将带底色")
+        if self.translucency < 1.0:
+            try:
+                self.root.attributes("-alpha", self.translucency)
+            except Exception:
+                pass
+
+    def _refresh_theme(self) -> None:
+        mode = str(self.cfg.get("theme") or "auto").lower()
+        if mode not in ("light", "dark"):
+            mode = detect_system_theme()
+        accent = str(self.cfg.get("accent") or "").strip() or detect_accent_color()
+        self.theme_name = mode
+        self.tokens = build_tokens(mode, accent)
+
+    # -- 布局 --------------------------------------------------------------
+    def _compute_layout(self) -> dict:
+        w = self.px(660)
+        pad = self.px(16)
+        head = self.px(34)
+        gap = self.px(9)
+        footer = self.px(34)
+        tail = self.px(13) if (self.frameless and self.use_tail) else 0
+        top_tail = tail if self.tail_edge == "top" else 0
+        bottom_tail = tail if self.tail_edge == "bottom" else 0
+        input_h = self.px(116) if self.state in ("input", "loading") else self.px(100)
+        en_h = self.px(126)
+        zh_h = self.px(102)
+
+        rects: dict = {"width": w, "top_tail": top_tail, "bottom_tail": bottom_tail}
+        y = top_tail + self.px(14)
+        rects["header"] = (pad, y, w - pad, y + head)
+        icon = self.px(26)
+        rects["icon"] = (pad, y + self.px(4), pad + icon, y + self.px(4) + icon)
+        rects["title"] = (pad + icon + self.px(10), y, w - pad - self.px(158), y + head)
+        rects["close"] = (w - pad - self.px(22), y + self.px(6), w - pad, y + head - self.px(6))
+        chip_w = self.px(104)
+        rects["chip"] = (
+            rects["close"][0] - self.px(8) - chip_w, y + self.px(7),
+            rects["close"][0] - self.px(8), y + head - self.px(7),
+        )
+        y += head + gap
+
+        rects["input_card"] = (pad, y, w - pad, y + input_h)
+        rects["input_text"] = (pad + self.px(6), y + self.px(4), w - pad - self.px(6), y + input_h - self.px(20))
+        rects["hint"] = (pad, y + input_h - self.px(20), w - pad - self.px(10), y + input_h - self.px(4))
+        y += input_h + gap
+
+        if self.has_result:
+            rects["en_card"] = (pad, y, w - pad, y + en_h)
+            rects["en_rail"] = (pad + self.px(1), y + self.px(14), pad + self.px(4), y + en_h - self.px(14))
+            rects["en_label"] = (pad + self.px(16), y + self.px(9), w - pad, y + self.px(24))
+            rects["en_text"] = (pad + self.px(10), y + self.px(22), w - pad - self.px(8), y + en_h - self.px(4))
+            y += en_h + gap
+            rects["zh_card"] = (pad, y, w - pad, y + zh_h)
+            rects["zh_rail"] = (pad + self.px(1), y + self.px(14), pad + self.px(4), y + zh_h - self.px(14))
+            rects["zh_label"] = (pad + self.px(16), y + self.px(9), w - pad, y + self.px(24))
+            rects["zh_text"] = (pad + self.px(10), y + self.px(22), w - pad - self.px(8), y + zh_h - self.px(4))
+            y += zh_h + gap
+
+        rects["footer"] = (pad, y, w - pad, y + footer)
+        height = y + footer + self.px(14) + bottom_tail
+        rects["bubble"] = (0, top_tail, w, height - bottom_tail)
+        rects["height"] = height
+        return rects
+
+    def _round_rect(self, x1, y1, x2, y2, r, **kw):
+        r = max(1, int(r))
+        pts = [
+            x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
+            x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+        ]
+        return self.canvas.create_polygon(pts, smooth=True, **kw)
+
+    def _draw_pill(self, tag: str, rect, text: str, kind: str = "ghost") -> None:
+        t = self.tokens
+        x1, y1, x2, y2 = rect
+        fill = {"primary": t["accent"], "ghost": t["chip"], "danger": t["chip"],
+                "active": t["accent_soft"]}[kind]
+        fg = {"primary": "#FFFFFF", "ghost": t["chip_text"], "danger": t["err"],
+              "active": t["accent"]}[kind]
+        shape = self._round_rect(x1, y1, x2, y2, (y2 - y1) // 2, fill=fill, outline=fill)
+        label = self.canvas.create_text(
+            (x1 + x2) // 2, (y1 + y2) // 2, text=text, fill=fg, font=self.f_status
+        )
+        self.items[tag] = {"shape": shape, "label": label, "kind": kind, "fill": fill}
+        self._bind_button(tag)
+
+    def _bind_button(self, tag: str) -> None:
+        canvas = self.canvas
+        canvas.tag_bind(tag, "<Button-1>", lambda _e, name=tag: self._on_button(name))
+        canvas.tag_bind(tag, "<Enter>", lambda _e, name=tag: self._set_button_hover(name, True))
+        canvas.tag_bind(tag, "<Leave>", lambda _e, name=tag: self._set_button_hover(name, False))
+
+    # -- 绘制 --------------------------------------------------------------
+    def _redraw(self) -> None:
+        c = self.canvas
+        t = self.tokens
+        self.rects = self._compute_layout()
+        c.delete("all")
+        self.items = {}
+        r = self.rects
+        x1, y1, x2, y2 = r["bubble"]
+        tail_h = self.px(13)
+
+        if self.frameless and self.use_tail:
+            cx = self.tail_x
+            if self.tail_edge == "top":
+                c.create_polygon(cx - tail_h, y1 + self.px(3), cx, y1 - tail_h + self.px(1),
+                                 cx + tail_h, y1 + self.px(3), fill=t["bubble"], outline="")
+            else:
+                c.create_polygon(cx - tail_h, y2 - self.px(3), cx, y2 + tail_h - self.px(1),
+                                 cx + tail_h, y2 - self.px(3), fill=t["bubble"], outline="")
+        self._round_rect(x1, y1, x2, y2, self.radius, fill=t["bubble"], outline=t["border"],
+                         width=max(1, int(self.dpi)))
+        if self.frameless and self.use_tail:
+            cx = self.tail_x
+            if self.tail_edge == "top":
+                c.create_rectangle(cx - tail_h + self.px(4), y1 - 1, cx + tail_h - self.px(4),
+                                   y1 + self.px(2), fill=t["bubble"], outline="")
+            else:
+                c.create_rectangle(cx - tail_h + self.px(4), y2 - self.px(2), cx + tail_h - self.px(4),
+                                   y2 + 1, fill=t["bubble"], outline="")
+
+        if self.state == "loading":
+            track_y = y1 + max(2, self.px(2))
+            left_x, right_x = x1 + self.radius, x2 - self.radius
+            c.create_rectangle(left_x, track_y - 1, right_x, track_y + 1, fill=t["hairline"], outline="")
+            span = right_x - left_x
+            seg = int(span * 0.3)
+            start = int(left_x + (span - seg) * self.progress)
+            c.create_rectangle(start, track_y - 1, start + seg, track_y + 1, fill=t["accent"], outline="")
+
+        ix1, iy1, ix2, iy2 = r["icon"]
+        self._round_rect(ix1, iy1, ix2, iy2, self.px(8), fill=t["accent"], outline=t["accent"])
+        c.create_text((ix1 + ix2) // 2, (iy1 + iy2) // 2 + self.px(1), text="译", fill="#FFFFFF",
+                      font=self.f_icon)
+        tx1, ty1, tx2, ty2 = r["title"]
+        c.create_text(tx1, (ty1 + ty2) // 2, text="中英双语气泡", anchor="w", fill=t["text"],
+                      font=self.f_title)
+        hx1, hy1, hx2, hy2 = r["chip"]
+        self._round_rect(hx1, hy1, hx2, hy2, (hy2 - hy1) // 2, fill=t["chip"], outline=t["chip"])
+        c.create_text((hx1 + hx2) // 2, (hy1 + hy2) // 2, text=self.hotkey_text,
+                      fill=t["chip_text"], font=self.f_chip)
+
+        cxp = (r["close"][0] + r["close"][2]) // 2
+        cyp = (r["close"][1] + r["close"][3]) // 2
+        close_r = self.px(11)
+        circle = c.create_oval(cxp - close_r, cyp - close_r, cxp + close_r, cyp + close_r,
+                               fill="", outline="")
+        cross = c.create_text(cxp, cyp, text="✕", fill=t["muted"], font=self.f_status)
+        self.items["close"] = {"shape": circle, "label": cross, "kind": "icon", "fill": ""}
+        self._bind_button("close")
+
+        self._round_rect(*r["input_card"], self.px(12), fill=t["card"], outline=t["border"])
+        hint = r["hint"]
+        c.create_text(hint[2], (hint[1] + hint[3]) // 2, text="Ctrl+Enter 翻译", anchor="e",
+                      fill=t["muted"], font=self.f_status)
+
+        if self.has_result:
+            for key, label, rail, color in (
+                ("en", "ENGLISH", "en_rail", t["accent"]),
+                ("zh", "回 译 中 文", "zh_rail", t["amber"]),
+            ):
+                self._round_rect(*r[f"{key}_card"], self.px(12), fill=t["card"], outline=t["border"])
+                self._round_rect(*r[rail], self.px(2), fill=color, outline=color)
+                lx1, ly1, _lx2, ly2 = r[f"{key}_label"]
+                c.create_text(lx1, (ly1 + ly2) // 2, text=label, anchor="w", fill=t["muted"],
+                              font=self.f_label)
+
+        fx1, fy1, fx2, fy2 = r["footer"]
+        cy = (fy1 + fy2) // 2
+        dot_color = {"ok": t["ok"], "err": t["err"], "busy": t["accent"]}.get(self.status_kind, t["muted"])
+        dot_r = max(3, self.px(4))
+        self.items["status"] = [
+            c.create_oval(fx1, cy - dot_r, fx1 + 2 * dot_r, cy + dot_r, fill=dot_color, outline=dot_color),
+            c.create_text(fx1 + 2 * dot_r + self.px(7), cy, text=self._status_line(), anchor="w",
+                          fill=t["err"] if self.status_kind == "err" else t["dim"], font=self.f_status),
+        ]
+        if self.copy_flash_until > time.time():
+            chip_w = self.px(76)
+            chip = (fx2 - chip_w, cy - self.px(11), fx2, cy + self.px(11))
+            self._round_rect(*chip, self.px(11), fill=t["ok_bg"], outline=t["ok_bg"])
+            self.items["copied"] = [
+                c.create_text((chip[0] + chip[2]) // 2, cy, text="✓ 已复制", fill=t["ok"],
+                              font=self.f_status)
+            ]
+
+        bx = fx1
+        for tag, label, kind in (("translate", "翻译", "primary"), ("copy_en", "复制英文", "ghost"),
+                                 ("copy_zh", "复制回译中文", "ghost"), ("copy_all", "复制全部", "ghost"),
+                                 ("clear", "清空", "ghost")):
+            width = self.px(24) + self.px(10.5) * len(label)
+            self._draw_pill(tag, (bx, cy - self.px(11), bx + width, cy + self.px(11)), label, kind)
+            bx += width + self.px(6)
+        pin_label = "已固定" if self.pinned else "固定"
+        pin_w = self.px(24) + self.px(10.5) * len(pin_label)
+        self._draw_pill("pin", (fx2 - pin_w, cy - self.px(11), fx2, cy + self.px(11)), pin_label,
+                        "active" if self.pinned else "ghost")
+        self._update_footer_visibility()
+
+    def _status_line(self) -> str:
+        if self.state == "error":
+            return "失败：" + (self.status_text or "未知错误")
+        return self.status_text or ""
+
+    def _update_footer_visibility(self) -> None:
+        show_buttons = self.hover or self.pinned
+        for key in ("translate", "copy_en", "copy_zh", "copy_all", "clear", "pin"):
+            item = self.items.get(key)
+            if item:
+                state = "normal" if show_buttons else "hidden"
+                self.canvas.itemconfigure(item["shape"], state=state)
+                self.canvas.itemconfigure(item["label"], state=state)
+        for key in ("status", "copied"):
+            for item in self.items.get(key, []):
+                self.canvas.itemconfigure(item, state="hidden" if show_buttons else "normal")
+
+    def _place_widgets(self) -> None:
+        r = self.rects
+        t = self.tokens
+        self._place(self.input, r["input_text"], t["card"], t["text"])
+        if self.has_result:
+            self._place(self.out_en, r["en_text"], t["card"], t["text"])
+            self._place(self.out_zh, r["zh_text"], t["card"], t["dim"])
+        else:
+            self.out_en.place_forget()
+            self.out_zh.place_forget()
+        self._update_placeholder()
+
+    def _place(self, widget, rect, bg, fg) -> None:
+        x1, y1, x2, y2 = rect
+        widget.configure(bg=bg, fg=fg, selectbackground=self.tokens["select"],
+                         selectforeground=self.tokens["text"], insertbackground=self.tokens["accent"])
+        widget.place(x=x1, y=y1, width=max(10, x2 - x1), height=max(10, y2 - y1))
+
+    # -- 定时器与动效 ------------------------------------------------------
+    def _schedule(self, delay_ms: int, func) -> None:
+        holder = {}
+
+        def wrapper():
+            self._jobs.discard(holder.get("id"))
+            func()
+
+        holder["id"] = self.root.after(int(delay_ms), wrapper)
+        self._jobs.add(holder["id"])
+
+    def _cancel_jobs(self) -> None:
+        for job in list(self._jobs):
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        self._jobs.clear()
+
+    def _anim(self, duration_ms: int, apply, on_done=None, frames: int = 12) -> None:
+        """缓出动画；animations=false 时直接落位。"""
+        if not self.animations or duration_ms <= 0:
+            apply(1.0)
+            if on_done:
+                on_done()
+            return
+        total = max(4, frames)
+        step_ms = max(8, int(duration_ms / total))
+
+        def tick(i: int) -> None:
+            progress = min(1.0, i / float(total))
+            apply(1.0 - (1.0 - progress) ** 3)
+            if i < total:
+                self._schedule(step_ms, lambda: tick(i + 1))
+            elif on_done:
+                on_done()
+
+        tick(1)
+
+    # -- 位置 --------------------------------------------------------------
+    def _work_area(self) -> tuple:
         try:
-            self.root.focus_force()
+            rect = wt.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+                return rect.left, rect.top, rect.right, rect.bottom
         except Exception:
             pass
-        self.input.focus_set()
-        self.root.after(120, lambda: self.input.focus_force())
+        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
 
-    def _force_foreground(self) -> None:
-        """Windows 有时不允许后台进程抢焦点，这里用原生 API 再推一把。"""
+    def _position_near_cursor(self) -> None:
+        self.rects = self._compute_layout()
+        left, top, right, bottom = self._work_area()
+        cx = self.root.winfo_pointerx()
+        cy = self.root.winfo_pointery()
+        gap = self.px(10)
+        height = self.rects["height"]
+        if cy + gap + height <= bottom - self.px(8):
+            self.tail_edge = "top"
+            self.win_y = cy + gap
+        else:
+            self.tail_edge = "bottom"
+            self.win_y = cy - gap - height
+        self.rects = self._compute_layout()
+        width = self.rects["width"]
+        height = self.rects["height"]
+        self.win_x = int(min(max(cx - width // 2, left + self.px(8)), right - width - self.px(8)))
+        self.win_y = int(min(max(self.win_y, top + self.px(6)), bottom - height - self.px(6)))
+        self.tail_x = int(min(max(cx - self.win_x, self.radius + self.px(18)),
+                             width - self.radius - self.px(18)))
+
+    def _apply_geometry(self, height: int) -> None:
+        full = self.rects["height"]
+        y = self.win_y + (full - height) if self.tail_edge == "bottom" else self.win_y
+        self.root.geometry("%dx%d+%d+%d" % (self.rects["width"], int(height), int(self.win_x), int(y)))
+
+    def _pointer_inside(self, margin: int = 0) -> bool:
         try:
-            user32 = ctypes.windll.user32
-            hwnd = user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
-            user32.ShowWindow(hwnd, 5)  # SW_SHOW
-            user32.SetForegroundWindow(hwnd)
+            x, y = self.root.winfo_pointerxy()
+            return (self.win_x - margin <= x <= self.win_x + self.rects["width"] + margin
+                    and self.root.winfo_y() - margin <= y <= self.root.winfo_y() + self.root.winfo_height() + margin)
+        except Exception:
+            return False
+
+    # -- 显示 / 隐藏 -------------------------------------------------------
+    def show(self) -> None:
+        self._hide_seq = getattr(self, "_hide_seq", 0) + 1
+        self._cancel_jobs()
+        self._refresh_theme()
+        self._position_near_cursor()
+        self._redraw()
+        self._place_widgets()
+        try:
+            self.root.attributes("-topmost", bool(self.cfg.get("always_on_top", True)))
+        except Exception:
+            pass
+        self.visible = True
+        self.was_foreground = False
+        self.last_fg_ours = False
+        self.shown_at = time.time()
+        self.root.deiconify()
+        self.root.lift()
+        self._force_foreground()
+        self._schedule(70, self._force_foreground)
+        self._schedule(180, self._force_foreground)
+        self.logger.info("气泡显示 %dx%d+%d+%d tail=%s", self.rects["width"], self.rects["height"],
+                         self.win_x, self.win_y, self.tail_edge)
+        target = self.rects["height"]
+        start = max(self.px(96), int(target * 0.6))
+
+        def apply(progress: float) -> None:
+            self._apply_geometry(int(start + (target - start) * progress))
+            if self.translucency < 1.0:
+                try:
+                    self.root.attributes("-alpha", self.translucency * (0.4 + 0.6 * progress))
+                except Exception:
+                    pass
+
+        self._anim(150, apply)
+        self.input.focus_set()
+        self._schedule(90, self._focus_input)
+        self._start_tick()
+
+    def _focus_input(self) -> None:
+        try:
+            self.input.focus_force()
         except Exception:
             pass
 
     def hide(self) -> None:
-        self.root.withdraw()
+        if not self.visible:
+            return
+        self.logger.info("气泡隐藏 pinned=%s", self.pinned)
+        self.visible = False
+        self.pinned = False
+        self._stop_tick()
+        self._cancel_jobs()
+        self._hide_seq = getattr(self, "_hide_seq", 0) + 1
+        seq = self._hide_seq
 
-    def _move_near_cursor(self) -> None:
+        def finish() -> None:
+            if seq == self._hide_seq and not self.visible:
+                self.root.withdraw()
+            self._cancel_jobs()
+
+        if self.translucency < 1.0 and self.animations:
+            def apply(progress: float) -> None:
+                try:
+                    self.root.attributes("-alpha", self.translucency * (1.0 - progress))
+                except Exception:
+                    pass
+
+            self._anim(110, apply, on_done=finish, frames=8)
+        else:
+            self._schedule(1, finish)
+
+    # -- 焦点与悬停 --------------------------------------------------------
+    def _hwnd(self):
         try:
-            self.root.update_idletasks()
-            width = self.root.winfo_width() or 780
-            height = self.root.winfo_height() or 860
-            x = self.root.winfo_pointerx() - width // 2
-            y = self.root.winfo_pointery() - 80
-            screen_w = self.root.winfo_screenwidth()
-            screen_h = self.root.winfo_screenheight()
-            x = max(0, min(x, screen_w - width))
-            y = max(0, min(y, screen_h - height))
-            self.root.geometry(f"+{x}+{y}")
+            return ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+        except Exception:
+            return self.root.winfo_id()
+
+    def _force_foreground(self) -> None:
+        """后台进程默认抢不到焦点，这里用 AttachThreadInput 推一把。"""
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        try:
+            hwnd = self._hwnd()
+            user32.ShowWindow(hwnd, 5)
+            foreground = user32.GetForegroundWindow()
+            if foreground != hwnd:
+                tid_fg = user32.GetWindowThreadProcessId(foreground, None)
+                tid_me = kernel32.GetCurrentThreadId()
+                user32.AttachThreadInput(tid_fg, tid_me, True)
+                user32.SetForegroundWindow(hwnd)
+                user32.SetFocus(hwnd)
+                user32.AttachThreadInput(tid_fg, tid_me, False)
+            self.root.focus_force()
         except Exception:
             pass
+
+    def _set_hover(self, value: bool) -> None:
+        if self.hover == value:
+            return
+        self.hover = value
+        self._update_footer_visibility()
+
+    def _set_button_hover(self, tag: str, hovered: bool) -> None:
+        item = self.items.get(tag)
+        if not item:
+            return
+        if item.get("kind") == "icon":
+            color = self.tokens["chip"] if hovered else ""
+            self.canvas.itemconfigure(item["shape"], fill=color, outline=color)
+            return
+        if item["kind"] == "primary":
+            color = self.tokens["accent_hover"] if hovered else self.tokens["accent"]
+        elif item["kind"] == "active":
+            color = self.tokens["select"] if hovered else self.tokens["accent_soft"]
+        else:
+            color = self.tokens["hover"] if hovered else self.tokens["chip"]
+        self.canvas.itemconfigure(item["shape"], fill=color, outline=color)
+
+    # -- 点外面收起 --------------------------------------------------------
+    def _start_tick(self) -> None:
+        self._stop_tick()
+        self._tick_job = self.root.after(200, self._tick)
+
+    def _stop_tick(self) -> None:
+        job = getattr(self, "_tick_job", None)
+        if job:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        self._tick_job = None
+
+    def _tick(self) -> None:
+        self._tick_job = None
+        if not self.visible:
+            return
+        # 气泡的尖角指向鼠标，光标天然落在窗口外，所以用一小圈余量判定"还在用"。
+        # 不用"前台窗口"做判定：无边框工具窗口抢不稳前台，会被浏览器之类的窗口抢回去。
+        near = self._pointer_inside(self.px(48))
+        if near != self.hover:
+            self._set_hover(near)
+        if (self.auto_dismiss and not self.pinned and not self.hover and not self.drag_offset
+                and time.time() - self.shown_at > 1.5
+                and not self._pointer_inside(self.px(160))):
+            self.logger.info("自动收起：鼠标已移开")
+            self.hide()
+            return
+        self._start_tick()
+
+    # -- 状态切换 ---------------------------------------------------------
+    def _apply_state(self, state: str, animate: bool = True) -> None:
+        self.state = state
+        old_height = 0
+        try:
+            old_height = self.root.winfo_height()
+        except Exception:
+            pass
+        self._redraw()
+        self._place_widgets()
+        target = self.rects["height"]
+        if animate and self.visible and old_height > self.px(80):
+            start = old_height
+
+            def apply(progress: float) -> None:
+                self._apply_geometry(int(start + (target - start) * progress))
+
+            self._anim(160, apply)
+        else:
+            self._apply_geometry(target)
+
+    def set_status(self, text: str, kind: str = "info") -> None:
+        self.status_text = text
+        if kind != "info":
+            self.status_kind = kind
+        elif self.status_kind not in ("busy",):
+            self.status_kind = "idle"
 
     # -- 事件循环 ---------------------------------------------------------
     def poll(self) -> None:
@@ -757,7 +1391,9 @@ class PopupApp:
                 if kind == "fire":
                     self.show()
                 elif kind == "status":
-                    self.set_status(payload)
+                    self.set_status(payload, "busy")
+                    if self.visible:
+                        self._redraw()
                 elif kind == "done":
                     self.on_done(payload)
                 elif kind == "error":
@@ -770,7 +1406,7 @@ class PopupApp:
 
     def on_hotkey_info(self, mode: str, detail: str) -> None:
         if mode == "hotkey":
-            text = f"热键已接管：{detail}（Copilot 键不再启动 Copilot）"
+            text = f"热键已接管：{detail}"
         elif mode == "hook":
             text = f"热键由键盘钩子接管：{detail}"
         elif mode == "fallback":
@@ -781,15 +1417,14 @@ class PopupApp:
             text = f"热键注册失败：{detail}"
         self.hotkey_text = detail
         self.logger.info("热键状态 %s: %s", mode, detail)
-        self.set_status(text)
+        self.set_status(text, "err" if mode in ("failed", "invalid") else "idle")
+        if self.visible:
+            self._redraw()
         if mode in ("fallback", "failed", "invalid"):
             self.show()
             self.messagebox.showwarning("中英双语气泡", text)
 
     # -- 交互 -------------------------------------------------------------
-    def set_status(self, text: str, color: str = "#444444") -> None:
-        self.status.configure(text=text, fg=color)
-
     def _on_ctrl_enter(self, _event):
         self.start_translate()
         return "break"
@@ -799,18 +1434,31 @@ class PopupApp:
             return
         text = self.input.get("1.0", "end").strip()
         if not text:
-            self.set_status("先输入要翻译的内容", "#b00020")
+            self.set_status("先输入要翻译的内容", "err")
+            self._redraw()
             return
         self.busy = True
-        self.btn_translate.configure(state="disabled")
+        self.has_result = False
         self.set_text(self.out_en, "")
         self.set_text(self.out_zh, "")
-        self.set_status("翻译中…")
+        self.status_text = "正在翻译…"
+        self.status_kind = "busy"
+        self.progress = 0.0
+        self._apply_state("loading")
+        self._animate_progress()
         threading.Thread(target=self._worker, args=(text,), daemon=True, name="translate").start()
+
+    def _animate_progress(self) -> None:
+        if not self.visible or self.state != "loading":
+            return
+        self.progress = (self.progress + 0.06) % 1.0
+        self._redraw()
+        self._schedule(45, self._animate_progress)
 
     def _worker(self, text: str) -> None:
         try:
-            result = translate(text, self.cfg, self.logger, progress=lambda msg: self.events.put(("status", msg)))
+            result = translate(text, self.cfg, self.logger,
+                               progress=lambda msg: self.events.put(("status", msg)))
             self.events.put(("done", result))
         except TranslationError as exc:
             self.logger.warning("翻译失败：%s", exc)
@@ -821,30 +1469,90 @@ class PopupApp:
 
     def on_done(self, result: dict) -> None:
         self.busy = False
-        self.btn_translate.configure(state="normal")
         self.set_text(self.out_en, result["english"])
         self.set_text(self.out_zh, result["chinese"])
+        self.has_result = True
         if result["direction"] == "zh2en":
             direction_text = "中文 → 英文 + 独立回译"
             primary = result["english"]
-            primary_name = "英文译文"
         else:
             direction_text = "英文 → 中文"
             primary = result["chinese"]
-            primary_name = "中文译文"
-        copied = ""
+        self.status_text = f"{direction_text} · 原文 {result['chars']} 字符 · {result['elapsed']:.1f}s"
+        self.status_kind = "ok"
+        self._apply_state("result")
         if self.cfg.get("auto_copy_english", True) and primary:
             self.copy_to_clipboard(primary)
-            copied = f"，{primary_name}已复制到剪贴板"
-        self.set_status(
-            f"{direction_text} | 原文 {result['chars']} 字符 | 用时 {result['elapsed']:.1f}s{copied}",
-            "#0b6b3a",
-        )
+            self._flash_copied()
 
     def on_error(self, message: str) -> None:
         self.busy = False
-        self.btn_translate.configure(state="normal")
-        self.set_status("失败：" + message, "#b00020")
+        self.status_text = message
+        self.status_kind = "err"
+        self._apply_state("error")
+
+    def _flash_copied(self) -> None:
+        self.copy_flash_until = time.time() + 1.5
+        self._redraw()
+        self._schedule(1600, self._clear_copied)
+
+    def _clear_copied(self) -> None:
+        self.copy_flash_until = 0.0
+        if self.visible:
+            self._redraw()
+
+    def _on_button(self, name: str) -> None:
+        if name == "translate":
+            self.start_translate()
+        elif name == "copy_en":
+            self.copy_field("english")
+        elif name == "copy_zh":
+            self.copy_field("chinese")
+        elif name == "copy_all":
+            self.copy_all()
+        elif name == "clear":
+            self.clear_all()
+        elif name == "pin":
+            self.toggle_pin()
+        elif name == "close":
+            self.hide()
+
+    def toggle_pin(self) -> None:
+        self.pinned = not self.pinned
+        self._redraw()
+
+    # -- 拖动 -------------------------------------------------------------
+    def _on_canvas_press(self, event) -> None:
+        try:
+            self.drag_offset = (event.x_root - self.win_x, event.y_root - self.root.winfo_y())
+        except Exception:
+            self.drag_offset = None
+
+    def _on_canvas_drag(self, event) -> None:
+        if not self.drag_offset:
+            return
+        dx, dy = self.drag_offset
+        self.win_x = int(event.x_root - dx)
+        self.win_y = int(event.y_root - dy)
+        self.root.geometry("+%d+%d" % (self.win_x, self.win_y))
+
+    def _on_canvas_release(self, _event) -> None:
+        self.drag_offset = None
+
+    # -- 滚轮 -------------------------------------------------------------
+    def _on_wheel(self, event):
+        x = event.x_root - self.win_x
+        y = event.y_root - self.root.winfo_y()
+        target = None
+        for key, widget in (("input_text", self.input), ("en_text", self.out_en), ("zh_text", self.out_zh)):
+            rect = self.rects.get(key)
+            if rect and rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]:
+                target = widget
+                break
+        if target is None:
+            return None
+        target.yview_scroll(-3 if event.delta > 0 else 3, "units")
+        return "break"
 
     # -- 工具 -------------------------------------------------------------
     def set_text(self, widget, text: str) -> None:
@@ -865,16 +1573,20 @@ class PopupApp:
         widget = self.out_en if field == "english" else self.out_zh
         text = self.get_text(widget)
         if not text:
-            self.set_status("这块还是空的", "#b00020")
+            self.set_status("这块还是空的", "err")
+            self._redraw()
             return
         self.copy_to_clipboard(text)
-        self.set_status("已复制", "#0b6b3a")
+        self.status_text = "已复制" + ("英文" if field == "english" else "回译中文")
+        self.status_kind = "ok"
+        self._flash_copied()
 
     def copy_all(self) -> None:
         english = self.get_text(self.out_en)
         chinese = self.get_text(self.out_zh)
         if not english and not chinese:
-            self.set_status("还没有结果", "#b00020")
+            self.set_status("还没有结果", "err")
+            self._redraw()
             return
         parts = []
         if english:
@@ -882,13 +1594,18 @@ class PopupApp:
         if chinese:
             parts.append("回译中文:\n" + chinese)
         self.copy_to_clipboard("\n\n".join(parts))
-        self.set_status("已复制全部", "#0b6b3a")
+        self.status_text = "已复制全部"
+        self.status_kind = "ok"
+        self._flash_copied()
 
     def clear_all(self) -> None:
         self.input.delete("1.0", "end")
         self.set_text(self.out_en, "")
         self.set_text(self.out_zh, "")
-        self.set_status("")
+        self.has_result = False
+        self.status_text = "输入中文开始翻译"
+        self.status_kind = "idle"
+        self._apply_state("input")
         self.input.focus_set()
 
 
@@ -1087,6 +1804,149 @@ def run_selftest() -> int:
     return 1 if failed else 0
 
 
+# --------------------------------------------------------------------------
+# 界面快照（开发验收用：python translate_popup.py --snapshot）
+# --------------------------------------------------------------------------
+
+SNAPSHOT_ZH = ("就是那个，帮我写个脚本，把文件夹里所有 png 批量转成 webp，emmm 质量别太低啊，"
+               "大概 85 左右就行，还有记得保留原文件，别给我删了，你懂我意思吧")
+SNAPSHOT_EN = ("Um, that one, help me write a script, batch convert all the png in the folder to "
+               "webp, emmm don't make the quality too low, around 85 is fine, and also remember to "
+               "keep the original files, don't delete them for me, you know what I mean right")
+SNAPSHOT_BACK = ("嗯，那个，帮我写个脚本，把文件夹里所有的png批量转成webp，emmm质量别弄太低，"
+                 "85左右就行，还有记得保留原文件，别给我删了，你懂我意思吧")
+
+
+def _grab_png(x: int, y: int, w: int, h: int, path: str) -> None:
+    """从屏幕抓一块区域存成 PNG（只用标准库）。"""
+    import struct
+    import zlib
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    gdi32.CreateDIBSection.restype = ctypes.c_void_p
+    gdi32.CreateDIBSection.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+                                       ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_uint]
+    gdi32.SelectObject.restype = ctypes.c_void_p
+    gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    gdi32.BitBlt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+
+    class BMIH(ctypes.Structure):
+        _fields_ = [
+            ("biSize", wt.DWORD), ("biWidth", ctypes.c_long), ("biHeight", ctypes.c_long),
+            ("biPlanes", wt.WORD), ("biBitCount", wt.WORD), ("biCompression", wt.DWORD),
+            ("biSizeImage", wt.DWORD), ("biXPels", ctypes.c_long), ("biYPels", ctypes.c_long),
+            ("biClrUsed", wt.DWORD), ("biClrImportant", wt.DWORD),
+        ]
+
+    screen = user32.GetDC(None)
+    mem = gdi32.CreateCompatibleDC(screen)
+    header = BMIH()
+    header.biSize = ctypes.sizeof(BMIH)
+    header.biWidth = w
+    header.biHeight = h
+    header.biPlanes = 1
+    header.biBitCount = 24
+    header.biCompression = 0
+    bits = ctypes.c_void_p()
+    bitmap = gdi32.CreateDIBSection(mem, ctypes.byref(header), 0, ctypes.byref(bits), None, 0)
+    old = gdi32.SelectObject(mem, bitmap)
+    gdi32.BitBlt(ctypes.c_void_p(mem), 0, 0, w, h, ctypes.c_void_p(screen), x, y, 0x00CC0020)
+    stride = ((w * 3 + 3) // 4) * 4
+    raw = ctypes.string_at(bits, stride * h)
+    gdi32.SelectObject(mem, old)
+    gdi32.DeleteObject(ctypes.c_void_p(bitmap))
+    gdi32.DeleteDC(ctypes.c_void_p(mem))
+    user32.ReleaseDC(None, screen)
+
+    rows = bytearray()
+    for row in range(h - 1, -1, -1):
+        line = bytearray(raw[row * stride:row * stride + w * 3])
+        line[0::3], line[2::3] = line[2::3], line[0::3]
+        rows.append(0)
+        rows.extend(line)
+
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        return (struct.pack(">I", len(payload)) + tag + payload
+                + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF))
+
+    png = b"\x89PNG\r\n\x1a\n"
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(bytes(rows), 6))
+    png += chunk(b"IEND", b"")
+    with open(path, "wb") as fh:
+        fh.write(png)
+
+
+def run_snapshot(logger: logging.Logger) -> int:
+    import tkinter as tk
+
+    enable_dpi_awareness()
+    out_dir = os.path.join(APP_DIR, "snapshots")
+    os.makedirs(out_dir, exist_ok=True)
+    cases = (
+        ("empty", "light", "input", "idle", "输入中文开始翻译"),
+        ("input", "light", "input", "idle", "输入中文开始翻译"),
+        ("loading", "light", "loading", "busy", "正在做独立的回译中文（只看英文）…"),
+        ("result", "light", "result", "ok", "中文 → 英文 + 独立回译 · 原文 79 字符 · 2.0s"),
+        ("hover", "light", "result", "ok", "中文 → 英文 + 独立回译 · 原文 79 字符 · 2.0s"),
+        ("error", "light", "error", "err", "接口返回 HTTP 401：Authentication Fails"),
+        ("dark_input", "dark", "input", "idle", "输入中文开始翻译"),
+        ("dark_result", "dark", "result", "ok", "中文 → 英文 + 独立回译 · 原文 79 字符 · 2.0s"),
+        ("dark_hover", "dark", "result", "ok", "中文 → 英文 + 独立回译 · 原文 79 字符 · 2.0s"),
+    )
+    for name, theme, state, kind, status in cases:
+        cfg = load_config()
+        cfg["frameless"] = True
+        cfg["animations"] = False
+        cfg["theme"] = theme
+        root = tk.Tk()
+        app = PopupApp(root, cfg, logger)
+        if name != "empty":
+            app.input.insert("1.0", SNAPSHOT_ZH)
+        app.set_text(app.out_en, SNAPSHOT_EN)
+        app.set_text(app.out_zh, SNAPSHOT_BACK)
+        app.has_result = state in ("result", "error")
+        app.state = state
+        app.status_kind = kind
+        app.status_text = status
+        app.hover = name.endswith("hover")
+        app.pinned = False
+        app.progress = 0.35
+        app.tail_edge = "top"
+        app.win_x = 0
+        app.win_y = 0
+        app._refresh_theme()
+        app.rects = app._compute_layout()
+        app.tail_x = int(app.rects["width"] * 0.26)
+        app.visible = True
+        app._redraw()
+        app._place_widgets()
+        # 快照要求完全不透明：否则会和桌面混色，看不出真实效果
+        try:
+            root.attributes("-alpha", 1.0)
+        except Exception:
+            pass
+        try:
+            root.attributes("-transparentcolor", "")
+        except Exception:
+            pass
+        app.canvas.configure(bg="#E9ECF1" if theme == "light" else "#101215")
+        app._apply_geometry(app.rects["height"])
+        root.deiconify()
+        root.lift()
+        root.update_idletasks()
+        root.update()
+        time.sleep(0.6)
+        root.update()
+        path = os.path.join(out_dir, f"{name}.png")
+        _grab_png(0, 0, app.rects["width"], app.rects["height"], path)
+        print(f"snapshot {name}: {app.rects['width']}x{app.rects['height']} -> {path}")
+        root.destroy()
+    return 0
+
+
 def run_app(logger: logging.Logger) -> int:
     import tkinter as tk
 
@@ -1128,13 +1988,16 @@ def run_app(logger: logging.Logger) -> int:
 
 def main() -> int:
     args = set(sys.argv[1:])
-    verbose = any(a in args for a in ("--once", "--selftest", "--install-startup", "--uninstall-startup", "--probe"))
+    verbose = any(a in args for a in ("--once", "--selftest", "--install-startup", "--uninstall-startup",
+                                      "--probe", "--snapshot"))
     logger = setup_logging(verbose_console=verbose)
     try:
         if "--selftest" in args:
             return run_selftest()
         if "--once" in args:
             return run_once(logger)
+        if "--snapshot" in args:
+            return run_snapshot(logger)
         if "--probe" in args:
             return run_probe(load_config(), logger)
         if "--install-startup" in args:
