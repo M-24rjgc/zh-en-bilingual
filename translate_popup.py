@@ -912,7 +912,7 @@ class PopupApp:
         pad = self.px(16)
         head = self.px(34)
         gap = self.px(9)
-        footer = self.px(34)
+        footer = self.px(56)
         tail = self.px(13) if (self.frameless and self.use_tail) else 0
         top_tail = tail if self.tail_edge == "top" else 0
         bottom_tail = tail if self.tail_edge == "bottom" else 0
@@ -952,6 +952,8 @@ class PopupApp:
             y += zh_h + gap
 
         rects["footer"] = (pad, y, w - pad, y + footer)
+        rects["status_row"] = (pad, y, w - pad, y + self.px(22))
+        rects["button_row"] = (pad, y + self.px(22), w - pad, y + footer)
         height = y + footer + self.px(14) + bottom_tail
         rects["bubble"] = (0, top_tail, w, height - bottom_tail)
         rects["height"] = height
@@ -972,9 +974,10 @@ class PopupApp:
                 "active": t["accent_soft"]}[kind]
         fg = {"primary": "#FFFFFF", "ghost": t["chip_text"], "danger": t["err"],
               "active": t["accent"]}[kind]
-        shape = self._round_rect(x1, y1, x2, y2, (y2 - y1) // 2, fill=fill, outline=fill)
+        shape = self._round_rect(x1, y1, x2, y2, (y2 - y1) // 2, fill=fill, outline=fill,
+                                 tags=(tag,))
         label = self.canvas.create_text(
-            (x1 + x2) // 2, (y1 + y2) // 2, text=text, fill=fg, font=self.f_status
+            (x1 + x2) // 2, (y1 + y2) // 2, text=text, fill=fg, font=self.f_status, tags=(tag,)
         )
         self.items[tag] = {"shape": shape, "label": label, "kind": kind, "fill": fill}
         self._bind_button(tag)
@@ -1044,11 +1047,12 @@ class PopupApp:
 
         cxp = (r["close"][0] + r["close"][2]) // 2
         cyp = (r["close"][1] + r["close"][3]) // 2
-        close_r = self.px(11)
+        close_r = self.px(13)
+        # 底色跟气泡一样：平时看不见，但整块都能点；悬停时才会显出浅色圆
         circle = c.create_oval(cxp - close_r, cyp - close_r, cxp + close_r, cyp + close_r,
-                               fill="", outline="")
-        cross = c.create_text(cxp, cyp, text="✕", fill=t["muted"], font=self.f_status)
-        self.items["close"] = {"shape": circle, "label": cross, "kind": "icon", "fill": ""}
+                               fill=t["bubble"], outline=t["bubble"], tags=("close",))
+        cross = c.create_text(cxp, cyp, text="✕", fill=t["muted"], font=self.f_status, tags=("close",))
+        self.items["close"] = {"shape": circle, "label": cross, "kind": "icon", "fill": t["bubble"]}
         self._bind_button("close")
 
         self._round_rect(*r["input_card"], self.px(12), fill=t["card"], outline=t["border"])
@@ -1067,7 +1071,7 @@ class PopupApp:
                 c.create_text(lx1, (ly1 + ly2) // 2, text=label, anchor="w", fill=t["muted"],
                               font=self.f_label)
 
-        fx1, fy1, fx2, fy2 = r["footer"]
+        fx1, fy1, fx2, fy2 = r["status_row"]
         cy = (fy1 + fy2) // 2
         dot_r = max(3, self.px(4))
         dot = c.create_oval(fx1, cy - dot_r, fx1 + 2 * dot_r, cy + dot_r, fill="", outline="")
@@ -1081,7 +1085,8 @@ class PopupApp:
         self._update_status()
         self._update_copied_chip()
 
-        bx = fx1
+        bx, by1, bx2, by2 = r["button_row"]
+        cy = (by1 + by2) // 2
         for tag, label, kind in (("translate", "翻译", "primary"), ("copy_en", "复制英文", "ghost"),
                                  ("copy_zh", "复制回译中文", "ghost"), ("copy_all", "复制全部", "ghost"),
                                  ("clear", "清空", "ghost")):
@@ -1144,16 +1149,15 @@ class PopupApp:
             self.items["copied"] = []
 
     def _update_footer_visibility(self) -> None:
-        show_buttons = self.hover or self.pinned
+        """按钮和状态行现在常驻显示：悬停浮现会不停闪，已经去掉了。"""
         for key in ("translate", "copy_en", "copy_zh", "copy_all", "clear", "pin"):
             item = self.items.get(key)
             if item:
-                state = "normal" if show_buttons else "hidden"
-                self.canvas.itemconfigure(item["shape"], state=state)
-                self.canvas.itemconfigure(item["label"], state=state)
+                self.canvas.itemconfigure(item["shape"], state="normal")
+                self.canvas.itemconfigure(item["label"], state="normal")
         for key in ("status", "copied"):
             for item in self.items.get(key, []):
-                self.canvas.itemconfigure(item, state="hidden" if show_buttons else "normal")
+                self.canvas.itemconfigure(item, state="normal")
 
     def _update_pin_pill(self) -> None:
         item = self.items.get("pin")
@@ -1369,14 +1373,13 @@ class PopupApp:
         if self.hover == value:
             return
         self.hover = value
-        self._update_footer_visibility()
 
     def _set_button_hover(self, tag: str, hovered: bool) -> None:
         item = self.items.get(tag)
         if not item:
             return
         if item.get("kind") == "icon":
-            color = self.tokens["chip"] if hovered else ""
+            color = self.tokens["chip"] if hovered else self.tokens["bubble"]
             self.canvas.itemconfigure(item["shape"], fill=color, outline=color)
             return
         if item["kind"] == "primary":
@@ -1968,11 +1971,11 @@ def run_snapshot(logger: logging.Logger) -> int:
         ("input", "light", "input", "idle", "输入中文开始翻译"),
         ("loading", "light", "loading", "busy", "正在做独立的回译中文（只看英文）…"),
         ("result", "light", "result", "ok", "中文 → 英文 + 独立回译 · 原文 79 字符 · 2.0s"),
-        ("hover", "light", "result", "ok", "中文 → 英文 + 独立回译 · 原文 79 字符 · 2.0s"),
+        ("pinned", "light", "result", "ok", "中文 → 英文 + 独立回译 · 原文 79 字符 · 2.0s"),
         ("error", "light", "error", "err", "接口返回 HTTP 401：Authentication Fails"),
         ("dark_input", "dark", "input", "idle", "输入中文开始翻译"),
         ("dark_result", "dark", "result", "ok", "中文 → 英文 + 独立回译 · 原文 79 字符 · 2.0s"),
-        ("dark_hover", "dark", "result", "ok", "中文 → 英文 + 独立回译 · 原文 79 字符 · 2.0s"),
+        ("dark_pinned", "dark", "result", "ok", "中文 → 英文 + 独立回译 · 原文 79 字符 · 2.0s"),
     )
     for name, theme, state, kind, status in cases:
         cfg = load_config()
@@ -1989,8 +1992,8 @@ def run_snapshot(logger: logging.Logger) -> int:
         app.state = state
         app.status_kind = kind
         app.status_text = status
-        app.hover = name.endswith("hover")
-        app.pinned = False
+        app.hover = False
+        app.pinned = name.endswith("pinned")
         app.progress = 0.35
         app.tail_edge = "top"
         app.win_x = 0
