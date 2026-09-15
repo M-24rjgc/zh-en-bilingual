@@ -32,10 +32,6 @@ original files, don't delete them for me, you know what I mean right
 
 ![dark](assets/dark.png)
 
-## 为什么用英文
-
-懂的都懂。同一段提示词，换成英文，模型通常听话得多——"降智"这两个字就不解释了。这个工具只是帮你把翻译这一步省掉。
-
 ## 安装和使用
 
 ```powershell
