@@ -1,0 +1,14 @@
+{
+  "hotkey": "win+shift+f23",
+  "fallback_hotkey": "ctrl+alt+z",
+  "model": "deepseek-flash",
+  "base_url": "https://api.deepseek.com",
+  "api_key": "",
+  "codex_config_path": "",
+  "reasoning_effort": "none",
+  "max_tokens": 2000,
+  "timeout_sec": 60,
+  "auto_copy_english": true,
+  "always_on_top": true,
+  "font_size": 14
+}
