@@ -42,7 +42,7 @@ python translate_popup.py --install-startup   # 开机常驻；也可以直接 p
 
 之后按 Copilot 键就行。
 
-- `Ctrl+Enter` 翻译，`Esc` 关闭
+- `Enter` 直接翻译，`Shift+Enter` 换行，`Esc` 关闭
 - `Ctrl+1` / `Ctrl+2` 复制英文 / 复制回译中文，`Ctrl+Shift+C` 复制全部
 - 鼠标悬停浮出按钮，移开自动收起，可以点固定
 - 按住气泡空白处可以拖动

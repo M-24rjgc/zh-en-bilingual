@@ -852,6 +852,12 @@ class PopupApp:
         self.canvas.bind("<Enter>", lambda _e: self._set_hover(True))
         self.canvas.bind("<Leave>", lambda _e: self._set_hover(False))
         self.root.bind("<Control-Return>", self._on_ctrl_enter)
+        # 最外层也绑一份：万一焦点没落在输入框上（窗口还没激活），回车照样能发送
+        self.root.bind("<Return>", self._on_submit)
+        self.root.bind("<Shift-Return>", self._on_newline)
+        self.root.bind("<FocusIn>", self._on_root_focus)
+        self.input.bind("<Return>", self._on_submit)
+        self.input.bind("<Shift-Return>", self._on_newline)
         self.root.bind("<Escape>", lambda _e: self.hide())
         self.root.bind("<Control-Key-1>", lambda _e: self.copy_field("english"))
         self.root.bind("<Control-Key-2>", lambda _e: self.copy_field("chinese"))
@@ -1013,10 +1019,16 @@ class PopupApp:
             track_y = y1 + max(2, self.px(2))
             left_x, right_x = x1 + self.radius, x2 - self.radius
             c.create_rectangle(left_x, track_y - 1, right_x, track_y + 1, fill=t["hairline"], outline="")
-            span = right_x - left_x
-            seg = int(span * 0.3)
-            start = int(left_x + (span - seg) * self.progress)
-            c.create_rectangle(start, track_y - 1, start + seg, track_y + 1, fill=t["accent"], outline="")
+            seg = int((right_x - left_x) * 0.3)
+            self.items["progress"] = {
+                "seg": c.create_rectangle(left_x, track_y - 1, left_x + seg, track_y + 1,
+                                          fill=t["accent"], outline=""),
+                "left": left_x,
+                "right": right_x,
+                "width": seg,
+                "y": track_y,
+            }
+            self._update_progress()
 
         ix1, iy1, ix2, iy2 = r["icon"]
         self._round_rect(ix1, iy1, ix2, iy2, self.px(8), fill=t["accent"], outline=t["accent"])
@@ -1041,7 +1053,7 @@ class PopupApp:
 
         self._round_rect(*r["input_card"], self.px(12), fill=t["card"], outline=t["border"])
         hint = r["hint"]
-        c.create_text(hint[2], (hint[1] + hint[3]) // 2, text="Ctrl+Enter 翻译", anchor="e",
+        c.create_text(hint[2], (hint[1] + hint[3]) // 2, text="Enter 翻译 · Shift+Enter 换行", anchor="e",
                       fill=t["muted"], font=self.f_status)
 
         if self.has_result:
@@ -1057,21 +1069,17 @@ class PopupApp:
 
         fx1, fy1, fx2, fy2 = r["footer"]
         cy = (fy1 + fy2) // 2
-        dot_color = {"ok": t["ok"], "err": t["err"], "busy": t["accent"]}.get(self.status_kind, t["muted"])
         dot_r = max(3, self.px(4))
-        self.items["status"] = [
-            c.create_oval(fx1, cy - dot_r, fx1 + 2 * dot_r, cy + dot_r, fill=dot_color, outline=dot_color),
-            c.create_text(fx1 + 2 * dot_r + self.px(7), cy, text=self._status_line(), anchor="w",
-                          fill=t["err"] if self.status_kind == "err" else t["dim"], font=self.f_status),
-        ]
-        if self.copy_flash_until > time.time():
-            chip_w = self.px(76)
-            chip = (fx2 - chip_w, cy - self.px(11), fx2, cy + self.px(11))
-            self._round_rect(*chip, self.px(11), fill=t["ok_bg"], outline=t["ok_bg"])
-            self.items["copied"] = [
-                c.create_text((chip[0] + chip[2]) // 2, cy, text="✓ 已复制", fill=t["ok"],
-                              font=self.f_status)
-            ]
+        dot = c.create_oval(fx1, cy - dot_r, fx1 + 2 * dot_r, cy + dot_r, fill="", outline="")
+        label = c.create_text(fx1 + 2 * dot_r + self.px(7), cy, text="", anchor="w",
+                              fill=t["dim"], font=self.f_status)
+        self.items["status"] = [dot, label]
+        self.items["status_dot"] = dot
+        self.items["status_text"] = label
+        self.items["footer_cy"] = cy
+        self.items["copied"] = []
+        self._update_status()
+        self._update_copied_chip()
 
         bx = fx1
         for tag, label, kind in (("translate", "翻译", "primary"), ("copy_en", "复制英文", "ghost"),
@@ -1081,7 +1089,7 @@ class PopupApp:
             self._draw_pill(tag, (bx, cy - self.px(11), bx + width, cy + self.px(11)), label, kind)
             bx += width + self.px(6)
         pin_label = "已固定" if self.pinned else "固定"
-        pin_w = self.px(24) + self.px(10.5) * len(pin_label)
+        pin_w = self.px(24) + self.px(10.5) * 3
         self._draw_pill("pin", (fx2 - pin_w, cy - self.px(11), fx2, cy + self.px(11)), pin_label,
                         "active" if self.pinned else "ghost")
         self._update_footer_visibility()
@@ -1090,6 +1098,50 @@ class PopupApp:
         if self.state == "error":
             return "失败：" + (self.status_text or "未知错误")
         return self.status_text or ""
+
+    def _update_status(self) -> None:
+        """只改状态那两个图元，不重画整个气泡。"""
+        t = self.tokens
+        dot = self.items.get("status_dot")
+        if dot:
+            color = {"ok": t["ok"], "err": t["err"], "busy": t["accent"]}.get(self.status_kind, t["muted"])
+            self.canvas.itemconfigure(dot, fill=color, outline=color)
+        text = self.items.get("status_text")
+        if text:
+            self.canvas.itemconfigure(
+                text, text=self._status_line(),
+                fill=t["err"] if self.status_kind == "err" else t["dim"],
+            )
+
+    def _update_progress(self) -> None:
+        """只移动进度条那一段，避免每帧重画。"""
+        info = self.items.get("progress")
+        if not info:
+            return
+        travel = info["right"] - info["left"] - info["width"]
+        start = info["left"] + travel * self.progress
+        self.canvas.coords(info["seg"], start, info["y"] - 1, start + info["width"], info["y"] + 1)
+
+    def _update_copied_chip(self) -> None:
+        """"✓ 已复制"胶囊出现/消失，同样不整屏重画。"""
+        cy = self.items.get("footer_cy")
+        footer = self.rects.get("footer")
+        if cy is None or not footer:
+            return
+        want = self.copy_flash_until > time.time()
+        existing = self.items.get("copied") or []
+        if want and not existing:
+            chip = (footer[2] - self.px(76), cy - self.px(11), footer[2], cy + self.px(11))
+            shape = self._round_rect(*chip, self.px(11), fill=self.tokens["ok_bg"],
+                                     outline=self.tokens["ok_bg"])
+            label = self.canvas.create_text((chip[0] + chip[2]) // 2, cy, text="✓ 已复制",
+                                            fill=self.tokens["ok"], font=self.f_status)
+            self.items["copied"] = [shape, label]
+            self._update_footer_visibility()
+        elif not want and existing:
+            for item in existing:
+                self.canvas.delete(item)
+            self.items["copied"] = []
 
     def _update_footer_visibility(self) -> None:
         show_buttons = self.hover or self.pinned
@@ -1102,6 +1154,16 @@ class PopupApp:
         for key in ("status", "copied"):
             for item in self.items.get(key, []):
                 self.canvas.itemconfigure(item, state="hidden" if show_buttons else "normal")
+
+    def _update_pin_pill(self) -> None:
+        item = self.items.get("pin")
+        if not item:
+            return
+        color = self.tokens["accent_soft"] if self.pinned else self.tokens["chip"]
+        fg = self.tokens["accent"] if self.pinned else self.tokens["chip_text"]
+        self.canvas.itemconfigure(item["shape"], fill=color, outline=color)
+        self.canvas.itemconfigure(item["label"], text="已固定" if self.pinned else "固定", fill=fg)
+        item["kind"] = "active" if self.pinned else "ghost"
 
     def _place_widgets(self) -> None:
         r = self.rects
@@ -1229,18 +1291,19 @@ class PopupApp:
                          self.win_x, self.win_y, self.tail_edge)
         target = self.rects["height"]
         start = max(self.px(96), int(target * 0.6))
+        if self.translucency < 1.0:
+            try:
+                self.root.attributes("-alpha", self.translucency)
+            except Exception:
+                pass
 
         def apply(progress: float) -> None:
             self._apply_geometry(int(start + (target - start) * progress))
-            if self.translucency < 1.0:
-                try:
-                    self.root.attributes("-alpha", self.translucency * (0.4 + 0.6 * progress))
-                except Exception:
-                    pass
 
-        self._anim(150, apply)
+        self._anim(130, apply, frames=10)
         self.input.focus_set()
         self._schedule(90, self._focus_input)
+        self._schedule(320, self._focus_input)
         self._start_tick()
 
     def _focus_input(self) -> None:
@@ -1272,7 +1335,7 @@ class PopupApp:
                 except Exception:
                     pass
 
-            self._anim(110, apply, on_done=finish, frames=8)
+            self._anim(90, apply, on_done=finish, frames=6)
         else:
             self._schedule(1, finish)
 
@@ -1372,7 +1435,10 @@ class PopupApp:
             def apply(progress: float) -> None:
                 self._apply_geometry(int(start + (target - start) * progress))
 
-            self._anim(160, apply)
+            if abs(target - start) > self.px(6):
+                self._anim(130, apply, frames=10)
+            else:
+                self._apply_geometry(target)
         else:
             self._apply_geometry(target)
 
@@ -1382,6 +1448,7 @@ class PopupApp:
             self.status_kind = kind
         elif self.status_kind not in ("busy",):
             self.status_kind = "idle"
+        self._update_status()
 
     # -- 事件循环 ---------------------------------------------------------
     def poll(self) -> None:
@@ -1392,8 +1459,6 @@ class PopupApp:
                     self.show()
                 elif kind == "status":
                     self.set_status(payload, "busy")
-                    if self.visible:
-                        self._redraw()
                 elif kind == "done":
                     self.on_done(payload)
                 elif kind == "error":
@@ -1418,8 +1483,6 @@ class PopupApp:
         self.hotkey_text = detail
         self.logger.info("热键状态 %s: %s", mode, detail)
         self.set_status(text, "err" if mode in ("failed", "invalid") else "idle")
-        if self.visible:
-            self._redraw()
         if mode in ("fallback", "failed", "invalid"):
             self.show()
             self.messagebox.showwarning("中英双语气泡", text)
@@ -1429,13 +1492,30 @@ class PopupApp:
         self.start_translate()
         return "break"
 
+    def _on_submit(self, _event):
+        """回车直接发送。"""
+        self.start_translate()
+        return "break"
+
+    def _on_newline(self, _event):
+        """Shift+Enter 换行。"""
+        self.input.insert("insert", "\n")
+        self.input.see("insert")
+        self._on_input_key()
+        return "break"
+
+    def _on_root_focus(self, event) -> None:
+        """窗口激活后，把键盘焦点交给输入框。"""
+        if event.widget is self.root:
+            self.input.focus_set()
+
     def start_translate(self) -> None:
         if self.busy:
             return
         text = self.input.get("1.0", "end").strip()
         if not text:
+            self.logger.info("提交时输入为空，忽略")
             self.set_status("先输入要翻译的内容", "err")
-            self._redraw()
             return
         self.busy = True
         self.has_result = False
@@ -1451,9 +1531,9 @@ class PopupApp:
     def _animate_progress(self) -> None:
         if not self.visible or self.state != "loading":
             return
-        self.progress = (self.progress + 0.06) % 1.0
-        self._redraw()
-        self._schedule(45, self._animate_progress)
+        self.progress = (self.progress + 0.03) % 1.0
+        self._update_progress()
+        self._schedule(25, self._animate_progress)
 
     def _worker(self, text: str) -> None:
         try:
@@ -1493,13 +1573,12 @@ class PopupApp:
 
     def _flash_copied(self) -> None:
         self.copy_flash_until = time.time() + 1.5
-        self._redraw()
+        self._update_copied_chip()
         self._schedule(1600, self._clear_copied)
 
     def _clear_copied(self) -> None:
         self.copy_flash_until = 0.0
-        if self.visible:
-            self._redraw()
+        self._update_copied_chip()
 
     def _on_button(self, name: str) -> None:
         if name == "translate":
@@ -1519,7 +1598,8 @@ class PopupApp:
 
     def toggle_pin(self) -> None:
         self.pinned = not self.pinned
-        self._redraw()
+        self._update_pin_pill()
+        self._update_footer_visibility()
 
     # -- 拖动 -------------------------------------------------------------
     def _on_canvas_press(self, event) -> None:
@@ -1574,7 +1654,6 @@ class PopupApp:
         text = self.get_text(widget)
         if not text:
             self.set_status("这块还是空的", "err")
-            self._redraw()
             return
         self.copy_to_clipboard(text)
         self.status_text = "已复制" + ("英文" if field == "english" else "回译中文")
@@ -1586,7 +1665,6 @@ class PopupApp:
         chinese = self.get_text(self.out_zh)
         if not english and not chinese:
             self.set_status("还没有结果", "err")
-            self._redraw()
             return
         parts = []
         if english:
