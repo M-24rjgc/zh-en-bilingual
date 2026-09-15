@@ -10,6 +10,8 @@
 ![hotkey](https://img.shields.io/badge/hotkey-Copilot%20key-8A2BE2?style=flat-square)
 ![stdlib](https://img.shields.io/badge/pure-Python%20stdlib-F7DF1E?style=flat-square&logo=python&logoColor=black)
 
+<sub>同一个模型，英文成绩是 100% 基准线，简体中文只有 96.9%——这就是值得多按这一下的理由。</sub>
+
 <img src="assets/demo.png" width="620" alt="按下热键后的中英双语气泡：中文输入、英文译文、回译中文">
 
 </div>
@@ -24,6 +26,35 @@
 于是你复制回来、粘进翻译软件、再翻回中文看一眼——一来一回，半分钟没了。
 
 这个工具把这一整套动作压成**一个按键**：弹出输入框 → 粘贴中文 → `Ctrl+Enter` → 英文直接进剪贴板，回译中文就在下面等着你验收。
+
+## 为什么值得多按这一下：同一个模型，英文确实更稳
+
+这不是玄学，也不是我们的臆测。**各家模型自己的文档里就写着。**
+
+Anthropic 在官方文档《Multilingual support》里公布了多语言测评成绩，**英文被固定为 100% 基准**，其他语言都以它为分母：
+
+| 语言 | Claude Sonnet 4.5 | Claude Haiku 4.5 |
+| --- | --- | --- |
+| 英文（基准） | 100% | 100% |
+| 西班牙语 | 98.2% | 96.4% |
+| 德语 | 97.0% | 94.3% |
+| **简体中文** | **96.9%** | **94.2%** |
+| 日语 | 96.8% | 93.5% |
+| 斯瓦希里语 | 91.1% | 78.3% |
+
+也就是说：**同样一道题，同样的模型，你换成中文问，成绩就往下掉。** 换成百分制，中文那个格子比英文少 3 到 6 分。
+
+研究层面的解释很直白——大模型的训练语料在语言之间**严重不均**：英语、德语、法语这类高资源语言表现明显更好，低资源语言明显更差（[arXiv:2404.11553](https://arxiv.org/abs/2404.11553)）。OpenAI 在 GPT-4 技术报告里做多语言 MMLU 时也承认：翻译过的题目"可能丢失细微信息，从而拉低成绩"，而且"有些语言会映射到长得多的 token 序列"（[GPT-4 Technical Report](https://arxiv.org/abs/2303.08774)）。
+
+网上管这个叫**"中文降智"**。这个词有点吓人，准确的说法是这样：
+
+- ✅ **真实的部分**：稳定存在几个百分点的落差，而且**指令越密集、格式要求越严，这点差距越容易放大成"它没照我说的做"**。
+- ❌ **被夸大的部分**：不是"中文就变傻"。日常聊天、中文写作、需要中文语感的活儿，直接用中文完全没问题。
+- ⚖️ **顺带辟个谣**：流传很广的"中文更费 token"在**句子层面并不成立**——我拿同一句话实测，中文原文 221 tokens、英文译文 229 tokens，基本持平。省 token 不是用英文的理由，**效果才是**。
+
+所以结论不是"中文不能用"，而是：**当你在写"要喂给模型执行的指令"时，英文是更稳的那张牌。**
+
+这个工具要做的，就是把这张牌的成本压到一个按键——**你继续用中文思考，英文这件事交给它。**
 
 ## 它和"随便找个翻译"有什么不一样
 
@@ -159,5 +190,7 @@ Windows 11 上 Copilot 键发的是 `Win+Shift+F23`。多数情况下这个组�
 Paste a Chinese prompt, hit `Ctrl+Enter`, and the English lands in your clipboard while a *separately generated* Chinese back-translation appears right below it — so you can check the translation yourself. Paste English and you get Chinese only. Tone, filler words and hesitations (`emmm`, `你懂我意思吧`) are preserved on purpose: the prompts explicitly forbid polishing, optimizing or restructuring, and code blocks, JSON, URLs and identifiers are left untouched.
 
 Two independent API calls make the back-translation an honest check — the second request only ever sees the English.
+
+**Why bother translating at all?** Because models are measurably weaker outside English. Anthropic's own [multilingual support docs](https://platform.claude.com/docs/en/build-with-claude/multilingual-support) fix English at a 100% baseline and score Simplified Chinese at 96.9% (Sonnet 4.5) and 94.2% (Haiku 4.5); research explains it as an imbalance in training corpora ([arXiv:2404.11553](https://arxiv.org/abs/2404.11553)). The gap is a few points — not the "Chinese makes it dumb" folklore — but on dense, format-strict instructions those few points are exactly what turns into "it didn't do what I asked". So: keep thinking in Chinese, let the tool handle the English.
 
 Pure Python standard library (no `pip install`, no AutoHotkey), works with any OpenAI-compatible `chat/completions` endpoint, and takes over the Copilot key so it no longer opens Copilot.
